@@ -4705,28 +4705,31 @@ async def main():
     Config.BOT_MODE = "polling"  # 强制使用Polling模式
 
     try:
-        # 1️⃣ 初始化数据库
         await db.initialize()
         logger.info("✅ 数据库初始化完成")
 
-        # 2️⃣ 初始化心跳管理器
+        # 🆕 初始化心跳服务
         try:
             await heartbeat_manager.initialize()
             logger.info("✅ 心跳管理器初始化完成")
         except Exception as e:
             logger.warning(f"⚠️ 初始化心跳管理器失败: {e}")
 
-        # 3️⃣ 启动Bot及基础任务
+        # 使用简化的启动
         await simple_on_startup()
+
+        # 直接使用Polling模式
         logger.info("🚀 使用 Polling 模式运行")
 
+        # 启动必要的后台任务
         essential_tasks = [
             asyncio.create_task(memory_cleanup_task()),
             asyncio.create_task(heartbeat_manager.start_heartbeat_loop()),
         ]
+
         logger.info(f"✅ 基础后台任务已启动: {len(essential_tasks)} 个任务")
 
-        # 4️⃣ 启动轮询（主循环）
+        # 启动轮询
         await dp.start_polling(bot, skip_updates=True)
 
     except KeyboardInterrupt:
@@ -4735,42 +4738,22 @@ async def main():
         logger.error(f"💥 主程序异常: {e}")
         raise
     finally:
-        logger.info("🧹 正在清理资源...")
-
-        # 1️⃣ 关闭数据库连接池
+        # 清理资源
         try:
             await db.close()
             logger.info("✅ 数据库连接已关闭")
         except Exception as e:
             logger.error(f"❌ 关闭数据库连接失败: {e}")
-
-        # 2️⃣ 关闭 Bot aiohttp 会话
         try:
-            if hasattr(bot, "session") and bot.session:
-                await bot.session.close()
-                logger.info("✅ 已安全关闭 Telegram bot aiohttp 会话")
+            await bot.session.close()
+            logger.info("✅ 已安全关闭 aiohttp ClientSession（bot.session）")
         except Exception as e:
             logger.warning(f"⚠️ 关闭 bot.session 失败: {e}")
-
-        # 3️⃣ 关闭心跳 aiohttp 会话
-        try:
-            if hasattr(heartbeat_manager, "session") and heartbeat_manager.session:
-                await heartbeat_manager.session.close()
-                logger.info("✅ 已安全关闭 heartbeat aiohttp 会话")
-        except Exception as e:
-            logger.warning(f"⚠️ 关闭 heartbeat.session 失败: {e}")
-
-        # 4️⃣ 停止心跳逻辑
         try:
             await heartbeat_manager.stop()
             logger.info("✅ 心跳管理器已关闭")
         except Exception as e:
-            logger.warning(f"⚠️ 停止心跳管理器失败: {e}")
-
-        # 5️⃣ 垃圾回收，确保干净退出
-        import gc
-
-        gc.collect()
+            logger.warning(f"⚠️ 关闭心跳管理器失败: {e}")
 
         logger.info("🎉 程序安全退出")
 
