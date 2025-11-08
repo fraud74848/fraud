@@ -995,11 +995,45 @@ class PostgreSQLDatabase:
 
             return result
 
-    async def get_all_groups(self) -> List[int]:
-        """获取所有群组ID"""
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch("SELECT chat_id FROM groups")
-            return [row["chat_id"] for row in rows]
+    async def get_all_groups(self, retries: int = 3, delay: float = 2.0) -> List[int]:
+        """
+        获取所有群组ID（带超时与自愈机制）
+        retries: 最大重试次数
+        delay: 每次失败后的基础等待秒数
+        """
+        for attempt in range(1, retries + 1):
+            try:
+                async with self.pool.acquire() as conn:
+                    # ✅ 增加超时保护（最多等待10秒）
+                    rows = await asyncio.wait_for(
+                        conn.fetch("SELECT chat_id FROM groups"),
+                        timeout=10
+                    )
+                    return [row["chat_id"] for row in rows]
+
+            except (asyncpg.InterfaceError,
+                    asyncpg.PostgresConnectionError,
+                    asyncio.TimeoutError) as e:
+                logger.warning(f"⚠️ 第 {attempt} 次获取群组失败: {e}")
+                
+                # ✅ 主动关闭可能失效的连接
+                try:
+                    await self.pool.close()
+                    logger.info("🔄 数据库连接池已重置")
+                except Exception as e2:
+                    logger.warning(f"重置连接池时出错: {e2}")
+
+                if attempt < retries:
+                    sleep_time = delay * attempt  # 指数退避
+                    logger.info(f"⏳ {sleep_time:.1f}s 后重试（第 {attempt} 次）...")
+                    await asyncio.sleep(sleep_time)
+                else:
+                    logger.error("❌ 重试次数耗尽，放弃操作。")
+                    return []
+
+            except Exception as e:
+                logger.error(f"💥 未知错误（get_all_groups）：{e}")
+                return []
 
     async def get_group_members(self, chat_id: int) -> List[Dict]:
         """获取群组成员"""
