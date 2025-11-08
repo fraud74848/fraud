@@ -4115,13 +4115,17 @@ async def monthly_report_task():
 
 # ==================== 内存清理任务优化 ====================
 async def memory_cleanup_task():
-    """定期内存清理任务 - 优化版本"""
+    """定期内存清理任务 - 使用安全版本"""
     while True:
         try:
             await asyncio.sleep(Config.CLEANUP_INTERVAL)
             await performance_optimizer.memory_cleanup()
-            # 清理数据库旧数据
-            await db.cleanup_old_data(30)
+            
+            # 使用安全的清理方法
+            success = await db.safe_cleanup_old_data(30)
+            if not success:
+                logger.warning("⚠️ 数据库清理未执行，但不影响主要功能")
+                
         except Exception as e:
             logger.error(f"❌ 内存清理任务失败: {e}")
             await asyncio.sleep(300)
