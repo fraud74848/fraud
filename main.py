@@ -3717,29 +3717,8 @@ async def export_data_before_reset(chat_id: int):
     except Exception as e:
         logger.error(f"❌ 自动导出数据失败：{e}")
 
-
-async def delayed_export(chat_id: int, delay_minutes: int = 30):
-    """在每日重置后延迟导出昨日数据"""
-    try:
-        logger.info(f"⏳ 群组 {chat_id} 将在 {delay_minutes} 分钟后导出昨日数据...")
-        await asyncio.sleep(delay_minutes * 60)
-
-        # 计算昨天日期（使用 get_beijing_time 保持与项目时区一致）
-        yesterday = get_beijing_time() - timedelta(days=1)
-        file_name = f"group_{chat_id}_statistics_{yesterday.strftime('%Y%m%d')}.csv"
-
-        # 导出并推送（使用已有函数 export_and_push_csv）
-        await export_and_push_csv(
-            chat_id, to_admin_if_no_group=True, file_name=file_name
-        )
-
-        logger.info(f"✅ 群组 {chat_id} 昨日数据导出并推送完成")
-    except Exception as e:
-        logger.error(f"❌ 群组 {chat_id} 延迟导出昨日数据失败: {e}")
-
-
 async def daily_reset_task():
-    """每日自动重置任务 - 延迟导出版本"""
+    """每日自动重置任务（含重置前与重置后导出）"""
     while True:
         now = get_beijing_time()
         logger.info(f"🔄 重置任务检查，当前时间: {now}")
@@ -3753,24 +3732,35 @@ async def daily_reset_task():
             reset_hour = group_data.get("reset_hour", Config.DAILY_RESET_HOUR)
             reset_minute = group_data.get("reset_minute", Config.DAILY_RESET_MINUTE)
 
-            # 检查是否到达重置时间
-            if now.hour == reset_hour and now.minute == reset_minute:
+            # 🕐 1️⃣ 重置前1分钟导出（昨天未重置的数据）
+            export_before_time = now.replace(
+                hour=reset_hour, minute=reset_minute, second=0, microsecond=0
+            ) - timedelta(minutes=1)
+
+            if now.hour == export_before_time.hour and now.minute == export_before_time.minute:
+                try:
+                    logger.info(f"📤 重置前1分钟导出群组 {chat_id} 数据中...")
+                    await asyncio.wait_for(export_and_push_csv(chat_id), timeout=30)
+                    logger.info(f"✅ 群组 {chat_id} 重置前导出成功")
+                except Exception as e:
+                    logger.error(f"❌ 群组 {chat_id} 重置前导出失败: {e}")
+
+            # 🕒 2️⃣ 到达重置时间 → 清空每日统计
+            elif now.hour == reset_hour and now.minute == reset_minute:
                 try:
                     logger.info(f"⏰ 到达重置时间，正在重置群组 {chat_id} 的数据...")
 
-                    # 1️⃣ 执行每日数据重置
+                    # 清空群成员每日数据
                     group_members = await db.get_group_members(chat_id)
                     for user_data in group_members:
                         user_lock = get_user_lock(chat_id, user_data["user_id"])
                         async with user_lock:
-                            await db.reset_user_daily_data(
-                                chat_id, user_data["user_id"]
-                            )
+                            await db.reset_user_daily_data(chat_id, user_data["user_id"])
 
                     logger.info(f"✅ 群组 {chat_id} 数据重置完成")
 
-                    # 2️⃣ 启动延迟导出任务（30 或 60 分钟后导出昨天数据）
-                    delay_minutes = 30  # 你可以改成 60
+                    # 🕓 3️⃣ 重置后延迟导出（昨日数据备份）
+                    delay_minutes = 30  # 可调成 60
                     asyncio.create_task(delayed_export(chat_id, delay_minutes))
 
                 except Exception as e:
@@ -3780,89 +3770,24 @@ async def daily_reset_task():
         await asyncio.sleep(60)
 
 
-async def auto_daily_export_task():
-    """每天重置前自动导出群组数据（完整修复版本）"""
-    # 添加任务状态跟踪
-    task_cooldown = False
-    
-    while True:
-        now = get_beijing_time()
-        
-        # 如果处于冷却期，简单休眠后继续
-        if task_cooldown:
-            await asyncio.sleep(300)  # 冷却期休眠5分钟
-            task_cooldown = False
-            continue
-            
-        logger.info(f"🕒 自动导出任务运行中，当前时间: {now}")
+async def delayed_export(chat_id: int, delay_minutes: int = 30):
+    """在每日重置后延迟导出昨日数据"""
+    try:
+        logger.info(f"⏳ 群组 {chat_id} 将在 {delay_minutes} 分钟后导出昨日数据...")
+        await asyncio.sleep(delay_minutes * 60)
 
-        try:
-            # ✅ 修复：使用带超时的 get_all_groups 调用
-            all_groups = await asyncio.wait_for(db.get_all_groups(), timeout=10.0)
-            
-            if not all_groups:
-                logger.warning("⚠️ 未获取到任何群组，10秒后重试。")
-                await asyncio.sleep(10)
-                continue
-                
-        except asyncio.TimeoutError:
-            logger.error("⏰ 数据库查询超时（get_all_groups），将在30秒后重试。")
-            await asyncio.sleep(30)
-            continue
-        except Exception as e:
-            logger.error(f"❌ 获取群组列表失败: {e}")
-            await asyncio.sleep(30)
-            continue
+        yesterday = get_beijing_time() - timedelta(days=1)
+        file_name = f"group_{chat_id}_statistics_{yesterday.strftime('%Y%m%d')}.csv"
 
-        export_executed = False
+        await export_and_push_csv(
+            chat_id, to_admin_if_no_group=True, file_name=file_name
+        )
 
-        for chat_id in all_groups:
-            try:
-                # ✅ 修复：为每个群组操作添加超时保护
-                group_data = await asyncio.wait_for(
-                    db.get_group_cached(chat_id), timeout=5.0
-                )
-                if not group_data:
-                    continue
+        logger.info(f"✅ 群组 {chat_id} 昨日数据导出并推送完成")
+    except Exception as e:
+        logger.error(f"❌ 群组 {chat_id} 延迟导出昨日数据失败: {e}")
 
-                reset_hour = group_data.get("reset_hour", Config.DAILY_RESET_HOUR)
-                reset_minute = group_data.get("reset_minute", Config.DAILY_RESET_MINUTE)
 
-                # ✅ 保留原有功能1: 23:59固定导出
-                if now.hour == 23 and now.minute == 59:
-                    logger.info(f"📤 23:59自动导出群组 {chat_id} 数据中...")
-                    try:
-                        await asyncio.wait_for(export_and_push_csv(chat_id), timeout=60.0)
-                        logger.info(f"✅ 群组 {chat_id} 导出成功 (23:59)")
-                        export_executed = True
-                    except asyncio.TimeoutError:
-                        logger.warning(f"⏰ 群组 {chat_id} 导出超时，跳过")
-
-                # ✅ 保留原有功能2: 重置前1分钟导出
-                else:
-                    reset_time = now.replace(
-                        hour=reset_hour, minute=reset_minute, second=0, microsecond=0
-                    )
-                    export_time = reset_time - timedelta(minutes=1)
-
-                    if (now.hour == export_time.hour and now.minute == export_time.minute):
-                        logger.info(f"📤 到达重置前导出时间，导出群组 {chat_id} ...")
-                        try:
-                            await asyncio.wait_for(export_and_push_csv(chat_id), timeout=60.0)
-                            logger.info(f"✅ 群组 {chat_id} 导出成功 (重置前)")
-                            export_executed = True
-                        except asyncio.TimeoutError:
-                            logger.warning(f"⏰ 群组 {chat_id} 导出超时，跳过")
-
-            except asyncio.TimeoutError:
-                logger.warning(f"⏰ 群组 {chat_id} 查询超时，跳过此群。")
-            except Exception as e:
-                logger.error(f"❌ 自动导出失败，群组 {chat_id}: {e}")
-
-        # ✅ 修复：但保留原有的休眠策略
-        sleep_time = 120 if export_executed else 60
-        logger.info(f"🕐 导出循环结束，休眠 {sleep_time}s ...")
-        await asyncio.sleep(sleep_time)
 
 
 # ==================== 活动状态恢复功能 ====================
@@ -4578,7 +4503,6 @@ async def optimized_main():
 
         normal_tasks = [
             asyncio.create_task(daily_reset_task()),
-            asyncio.create_task(auto_daily_export_task()),
             asyncio.create_task(efficient_monthly_export_task()),
             asyncio.create_task(monthly_report_task()),
         ]
@@ -4693,7 +4617,6 @@ async def webhook_main():
             asyncio.create_task(health_monitoring_task()),
             asyncio.create_task(heartbeat_manager.start_heartbeat_loop()),
             asyncio.create_task(daily_reset_task()),
-            asyncio.create_task(auto_daily_export_task()),
             asyncio.create_task(efficient_monthly_export_task()),
         ]
 
@@ -4747,7 +4670,6 @@ async def polling_main():
         asyncio.create_task(health_monitoring_task()),
         asyncio.create_task(heartbeat_manager.start_heartbeat_loop()),
         asyncio.create_task(daily_reset_task()),
-        asyncio.create_task(auto_daily_export_task()),
         asyncio.create_task(efficient_monthly_export_task()),
     ]
 
@@ -4876,5 +4798,6 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"💥 机器人异常退出: {e}")
         sys.exit(1)
+
 
 
